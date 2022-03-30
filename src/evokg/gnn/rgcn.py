@@ -39,27 +39,31 @@ class RGCN(nn.Module):
             self.layers.append(RelGraphConv(
                 self.in_dim, self.out_dim, self.num_rels, self.regularizer, self.num_bases, self.use_bias,
                 activation=None, self_loop=self.use_self_loop, dropout=self.dropout,
-                layer_norm=self.layer_norm, low_mem=low_mem,
+                layer_norm=self.layer_norm, 
+#                low_mem=low_mem,
             ))
         else:
             # i2h
             self.layers.append(RelGraphConv(
                 self.in_dim, self.hid_dim, self.num_rels, self.regularizer, self.num_bases, self.use_bias,
                 activation=self.activation, self_loop=self.use_self_loop, dropout=self.dropout,
-                layer_norm=self.layer_norm, low_mem=low_mem,
+                layer_norm=self.layer_norm, 
+#                low_mem=low_mem,
             ))
             # h2h
             for i in range(1, self.n_layers - 1):
                 self.layers.append(RelGraphConv(
                     self.hid_dim, self.hid_dim, self.num_rels, self.regularizer, self.num_bases, self.use_bias,
                     activation=self.activation, self_loop=self.use_self_loop, dropout=self.dropout,
-                    layer_norm=self.layer_norm, low_mem=low_mem,
+                    layer_norm=self.layer_norm, 
+#                    low_mem=low_mem,
                 ))
             # h2o
             self.layers.append(RelGraphConv(
                 self.hid_dim, self.out_dim, self.num_rels, self.regularizer, self.num_bases, self.use_bias,
                 activation=None, self_loop=self.use_self_loop, dropout=self.dropout,
-                layer_norm=self.layer_norm, low_mem=low_mem,
+                layer_norm=self.layer_norm, 
+#                low_mem=low_mem,
             ))
         assert self.n_layers == len(self.layers), (self.n_layers, len(self.layers))
 

@@ -11,7 +11,7 @@ from evokg.gnn import RGCN
 from evokg.tpp import LogNormMixTPP
 from utils.model_utils import node_norm_to_edge_norm, get_embedding
 
-MultiAspectEmbedding = namedtuple('MultiAspectEmbedding', ['structural', 'temporal'], defaults=[None, None])
+MultiAspectEmbedding = namedtuple('MultiAspectEmbedding', ['structural', 'temporal'])
 
 
 class EmbeddingUpdater(nn.Module):
