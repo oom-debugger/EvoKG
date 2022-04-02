@@ -3,6 +3,7 @@ import torch.nn as nn
 
 
 class TimeIntervalTransform(nn.Module):
+    """Adjusts/Transform the time scale based on the input flags."""
     EPSILON = 1e-10
 
     def __init__(self, log_transform=True, normalize=False, time_intervals=None):

@@ -27,6 +27,7 @@ from utils.train_utils import setup_cuda, EarlyStopping, nullable_string, activa
 
 def main(args):
     """Data"""
+    # G is a dgl.graph object: https://docs.dgl.ai/api/python/dgl.DGLGraph.html#dgl.DGLGraph
     G = data.load_temporal_knowledge_graph(args.graph)
     num_relations = G.num_relations
     logger.info("\n" + "=" * 80 + "\n"
@@ -36,14 +37,30 @@ def main(args):
                 f"# relations={G.num_relations}\n" + "=" * 80 + "\n")
 
     collate_fn = partial(utils.collate_fn, G=G)
+    # TODO(khatir): Consider making it DataParallel.
     train_data_loader = DataLoader(G.train_times, shuffle=False, collate_fn=collate_fn)
     val_data_loader = DataLoader(G.val_times, shuffle=False, collate_fn=collate_fn)
     test_data_loader = DataLoader(G.test_times, shuffle=False, collate_fn=collate_fn)
 
     """Model"""
+    # initializing the first event time.
     node_latest_event_time = torch.zeros(G.number_of_nodes(), G.number_of_nodes() + 1, 2, dtype=settings.INTER_EVENT_TIME_DTYPE)
+    # adjust the time scale base on the input flag.
     time_interval_transform = TimeIntervalTransform(log_transform=args.time_interval_log_transform)
 
+    # initialized the EmbeddingUpdater. The object contains:
+    #     GraphStructuralRNNConv  
+    #            -->   which contains RGCN for learning the structure 
+    #                  and either RNN or GRU for learning dynamic structural changes. 
+    #                  It also contains a dropout layer 
+    #     GraphTemporalRNNConv    
+    #            -->   same layers as GraphStructuralRNNConv with the following extra parameters:
+    #                   (1) node_latest_event_time, (2) time_interval_transform 
+    #                   NOTE: RGCNs are exactly identical in  GraphTemporalRNNConv and GraphStructuralRNNConv, same as RNN 
+    #                         (except the input argument structural_rnn_in_dim have different name). 
+    #                   NOTE: it seems these two models are only different in forward function...
+    #     2 RelationRNN models
+    # 
     embedding_updater = EmbeddingUpdater(G.number_of_nodes(),
                                          args.static_entity_embed_dim,
                                          args.structural_dynamic_entity_embed_dim,
@@ -63,6 +80,7 @@ def main(args):
         assert args.embedding_updater_structural_gconv is None, args.embedding_updater_structural_gconv
         assert args.embedding_updater_temporal_gconv is None, args.embedding_updater_temporal_gconv
 
+    # Combines the embeddings across the time (using RNN), it is used to calculated the loss function.
     combiner = Combiner(args.static_entity_embed_dim,
                         args.structural_dynamic_entity_embed_dim,
                         args.static_dynamic_combine_mode,
@@ -70,13 +88,19 @@ def main(args):
                         G.num_relations,
                         args.dropout,
                         args.combiner_activation).to(args.device)
-
+    # Calculates 
+    # log_prob: torch.Size([])
+    # head_pred: torch.Size([7016, node_size])
+    # rel_pred: torch.Size([7016, relations])
+    # tail_pred: torch.Size([7016, node_size])
     edge_model = EdgeModel(G.number_of_nodes(),
                            G.num_relations,
                            args.rel_embed_dim,
                            combiner,
                            dropout=args.dropout).to(args.device)
 
+    # contains utility functions that are used in calculating loss function (only log_prob_density is currently used)
+    # TODO(khatir): find out the exact usage of expected_event_time and log_prob_interval functions of the class.
     inter_event_time_model = InterEventTimeModel(dynamic_entity_embed_dim=args.temporal_dynamic_entity_embed_dim,
                                                  static_entity_embed_dim=args.static_entity_embed_dim,
                                                  num_rels=G.num_relations,
@@ -127,6 +151,8 @@ def main(args):
         init_dynamic_entity_embeds.structural, init_dynamic_entity_embeds.temporal,
         init_dynamic_relation_embeds.structural, init_dynamic_relation_embeds.temporal,
     ]
+    # TODO(khatir): change the optimizers to use Riemmanian Adam.
+    # investigate if we can use mixure of optimizers (Riemannian Adam for RGCN and Adam for RNN).
     edge_optimizer = torch.optim.AdamW(params, lr=args.lr, weight_decay=args.weight_decay)
     time_optimizer = torch.optim.AdamW(params, lr=args.lr, weight_decay=args.weight_decay)
 
@@ -163,6 +189,7 @@ def main(args):
     try:
         for epoch in range(args.epochs):
             """Training"""
+            # Sets the module in training mode.
             model.train()
             epoch_start_time = time.time()
 
@@ -180,13 +207,16 @@ def main(args):
             batch_train_loss = 0
             batches_train_loss_dict = defaultdict(list)
 
+
             for batch_i, (prior_G, batch_G, cumul_G, batch_times) in enumerate(train_tqdm):
                 train_tqdm.set_description(f"[Training / epoch-{epoch} / batch-{batch_i}]")
                 last_batch = batch_i == num_train_batches - 1
 
+                ########################## CALCULATE LOSS AND BACKWARD #####################################
                 # Based on the current entity embeddings, predict edges in batch_G and compute training loss
                 batch_train_loss_dict = compute_loss(model, args.optimize, batch_G, static_entity_embeds,
                                                      dynamic_entity_emb, dynamic_relation_emb, args)
+                # TODO(khatir): Firgure out why the loss in cumulative to calculate the loss for the whole dataset for 1 epoch
                 batch_train_loss += sum(batch_train_loss_dict.values())
 
                 for loss_term, loss_val in batch_train_loss_dict.items():
@@ -207,6 +237,9 @@ def main(args):
                     torch.cuda.empty_cache()
 
                     if args.embedding_updater_structural_gconv or args.embedding_updater_temporal_gconv:
+                        # Detaches the Tensor from the graph that created it, making it a leaf. This method also affects forward 
+                        # mode AD gradients and the result will never have forward mode AD gradients.
+                        # TODO(khatir): why do we do detach_ here?
                         for emb in dynamic_entity_emb + dynamic_relation_emb:
                             emb.detach_()
 
@@ -214,7 +247,9 @@ def main(args):
                                f"batch train loss total={sum([sum(l) for l in batches_train_loss_dict.values()]):.4f} | "
                                f"{', '.join([f'{loss_term}={sum(loss_cumul):.4f}' for loss_term, loss_cumul in batches_train_loss_dict.items()])}")
                     batches_train_loss_dict = defaultdict(list)
+                ############################# FINISH CALCULATING LOSS AND BACKWARD ##################################
 
+                ##################### FORWARD FUNCTION #######################
                 dynamic_entity_emb, dynamic_relation_emb = \
                     model.embedding_updater.forward(prior_G, batch_G, cumul_G, static_entity_embeds,
                                                     dynamic_entity_emb, dynamic_relation_emb, args.device)
@@ -222,13 +257,14 @@ def main(args):
                 if last_batch:
                     dynamic_entity_emb_post_train = dynamic_entity_emb
                     dynamic_relation_emb_post_train = dynamic_relation_emb
+                ##################### End FORWARD  #######################
 
             epoch_end_time = time.time()
             logger.info(f"[Epoch-{epoch}] Train loss total={sum([sum(l) for l in epoch_train_loss_dict.values()]):.4f} | "
                         f"{', '.join([f'{loss_term}={sum(loss_cumul):.4f}' for loss_term, loss_cumul in epoch_train_loss_dict.items()])} | "
                         f"elapsed time={epoch_end_time - epoch_start_time:.4f} secs")
 
-            """Validation"""
+            """Validation happen at the end of each epoch."""
             if epoch >= args.eval_from and epoch % args.eval_every == 0:
                 dynamic_entity_emb = dynamic_entity_emb_post_train
                 dynamic_relation_emb = dynamic_relation_emb_post_train

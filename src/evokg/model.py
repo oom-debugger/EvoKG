@@ -15,6 +15,7 @@ MultiAspectEmbedding = namedtuple('MultiAspectEmbedding', ['structural', 'tempor
 
 
 class EmbeddingUpdater(nn.Module):
+    # 
     def __init__(self, num_nodes, in_dim, structural_hid_dim, temporal_hid_dim, graph_structural_conv, graph_temporal_conv,
                  node_latest_event_time, num_rels, rel_embed_dim, num_gconv_layers=2, num_rnn_layers=1,
                  time_interval_transform=None, dropout=0.0, activation=None, graph_name=None):
@@ -26,6 +27,7 @@ class EmbeddingUpdater(nn.Module):
         self.temporal_hid_dim = temporal_hid_dim
         self.node_latest_event_time = node_latest_event_time
 
+        # 
         if graph_structural_conv in ['RGCN+GRU', 'RGCN+RNN']:
             gconv, rnn = graph_structural_conv.split("+")
             self.graph_structural_conv = \
@@ -52,6 +54,18 @@ class EmbeddingUpdater(nn.Module):
 
     def forward(self, prior_G, batch_G, cumul_G, static_entity_emb, dynamic_entity_emb,
                 dynamic_relation_emb, device, batch_node_indices=None):
+        """
+        Args:
+            prior_G: object of type dgl.heterograph.DGLHeteroGraph.
+            batch_G: object of type dgl.heterograph.DGLHeteroGraph.
+            cumul_G: object of type dgl.heterograph.DGLHeteroGraph.
+            static_entity_emb: a named tuple called MultiAspectEmbedding that contains 
+                two embedding tensors one for structural embedding and the other
+                for temporal embeddings.
+            dynamic_entity_emb: a named tuple called MultiAspectEmbedding that contains 
+                two embedding tensors one for structural embedding and the other
+                for temporal embeddings. 
+        """
         assert all([emb.device == torch.device('cpu') for emb in dynamic_entity_emb]), [emb.device for emb in dynamic_entity_emb]
 
         batch_G = batch_G.to(device)
@@ -200,6 +214,14 @@ class GraphTemporalRNNConv(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, batch_G, dynamic_entity_emb, static_entity_emb, device, batch_node_indices=None):
+        """
+        Args:
+            dynamic_entity_emb: Dynamic embeddings that contains both temporal and structural embeddings.
+                Please note that only structural embedding is being used in this function.
+            static_entity_emb: Static Embeddings that contains (1) temporal (2) structural embeddings. 
+                but in this forward function only structural embeddings are being used.
+            
+        """
         if batch_node_indices is None:
             batch_node_indices = batch_G.nodes().long()  # update embeddings of all nodes in batch_G
 
@@ -344,6 +366,13 @@ class EventTimeHelper:
 class Combiner(nn.Module):
     def __init__(self, static_emb_dim, dynamic_emb_dim, static_dynamic_combine_mode,
                  graph_conv, num_rels=None, dropout=0.0, activation=None, num_gconv_layers=1):
+        """
+        Args:
+            static_emb_dim: 
+            dynamic_emb_dim:
+            static_dynamic_combine_mode: a string thart determine the combiner function (e.g. 'concat').
+            graph_conv: if set, it used RGCN to run conv on he static and dynamic embeddings.
+        """
         super().__init__()
         self.static_emb_dim = static_emb_dim
         self.dynamic_emb_dim = dynamic_emb_dim
@@ -538,6 +567,7 @@ class EdgeModel(nn.Module):
         return self.graph_readout.forward(G, ('emb', combined_emb), ('static_emb', static_emb), ('dynamic_emb', dynamic_emb))
 
     def forward(self, G, combined_emb, static_emb, dynamic_emb, dynamic_relation_emb, eid=None, return_pred=False):
+        """Calculate the log probability of the embeddings and then aggregated them."""
         with G.local_scope():
             G.ndata['emb'] = combined_emb
 
@@ -595,7 +625,8 @@ class InterEventTimeModel(nn.Module):
         return self.tpp_model.expected_event_time(batch_G, dynamic_entity_emb, static_entity_emb, dynamic_relation_emb,
                                                   node_latest_event_time, batch_eid)
 
-
+# wrapper for all components.
+# we can set training mode for all of them together, also, backprop, etc. together...
 class Model(nn.Module):
     def __init__(self, embedding_updater: EmbeddingUpdater, combiner, edge_model, inter_event_time_model, node_latest_event_time):
         super().__init__()
