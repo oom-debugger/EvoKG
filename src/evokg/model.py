@@ -628,7 +628,12 @@ class InterEventTimeModel(nn.Module):
 # wrapper for all components.
 # we can set training mode for all of them together, also, backprop, etc. together...
 class Model(nn.Module):
-    def __init__(self, embedding_updater: EmbeddingUpdater, combiner, edge_model, inter_event_time_model, node_latest_event_time):
+    def __init__(self, 
+                 embedding_updater: EmbeddingUpdater, 
+                 combiner: Combiner, 
+                 edge_model: EdgeModel, 
+                 inter_event_time_model: InterEventTimeModel,
+                 node_latest_event_time: torch.Tensor):
         super().__init__()
         self.embedding_updater = embedding_updater
         self.combiner = combiner

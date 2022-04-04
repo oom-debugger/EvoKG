@@ -151,6 +151,11 @@ def main(args):
         init_dynamic_entity_embeds.structural, init_dynamic_entity_embeds.temporal,
         init_dynamic_relation_embeds.structural, init_dynamic_relation_embeds.temporal,
     ]
+    # when initializing optimizer you explicitly tell it what parameters (tensors) of the model it should be updating. 
+    # The gradients are "stored" by the tensors themselves (they have a grad and a requires_grad attributes) once you call backward() on the loss. 
+    # After computing the gradients for all tensors in the model, calling optimizer.step() makes the optimizer iterate over all parameters (tensors) 
+    # it is supposed to update and use their internally stored grad to update their values.
+                
     # TODO(khatir): change the optimizers to use Riemmanian Adam.
     # investigate if we can use mixure of optimizers (Riemannian Adam for RGCN and Adam for RNN).
     edge_optimizer = torch.optim.AdamW(params, lr=args.lr, weight_decay=args.weight_decay)
@@ -222,12 +227,13 @@ def main(args):
                 for loss_term, loss_val in batch_train_loss_dict.items():
                     epoch_train_loss_dict[loss_term].append(loss_val.item())
                     batches_train_loss_dict[loss_term].append(loss_val.item())
-
+                
+                
                 if batch_i > 0 and ((batch_i % args.rnn_truncate_every == 0) or last_batch):
                     # noinspection PyUnresolvedReferences
                     batch_train_loss.backward()
                     batch_train_loss = 0
-
+                
                     if args.optimize in ['edge', 'both']:
                         edge_optimizer.step()
                         edge_optimizer.zero_grad()
