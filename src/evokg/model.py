@@ -164,7 +164,7 @@ class GraphRNNConv(nn.Module):
 class GraphStructuralRNNConv(GraphRNNConv):
     def __init__(self, graph_conv, num_gconv_layers, rnn, num_rnn_layers, in_dim, hid_dim, num_nodes, num_rels, rel_embed_dim,
                  add_entity_emb=False, dropout=0.0, activation=None, graph_name=None):
-        super(GraphRNNConv).__init__(
+        super(GraphRNNConv, self).__init__(
                 graph_conv=graph_conv, 
                 num_gconv_layers=num_gconv_layers, 
                 rnn=rnn, 
@@ -222,7 +222,7 @@ class GraphTemporalRNNConv(nn.Module):
     def __init__(self, graph_conv, num_gconv_layers, rnn, num_rnn_layers, in_dim, hid_dim,
                  node_latest_event_time, time_interval_transform, num_nodes, num_rels,
                  dropout=0.0, activation=None, graph_name=None):
-        super(GraphRNNConv).__init__(
+        super(GraphRNNConv, self).__init__(
                 graph_conv=graph_conv, 
                 num_gconv_layers=num_gconv_layers, 
                 rnn=rnn, 
