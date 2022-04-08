@@ -218,7 +218,7 @@ class GraphStructuralRNNConv(GraphRNNConv):
         return ", ".join(field_desc)
 
 
-class GraphTemporalRNNConv(nn.Module):
+class GraphTemporalRNNConv(GraphRNNConv):
     def __init__(self, graph_conv, num_gconv_layers, rnn, num_rnn_layers, in_dim, hid_dim,
                  node_latest_event_time, time_interval_transform, num_nodes, num_rels,
                  dropout=0.0, activation=None, graph_name=None):
