@@ -115,12 +115,16 @@ class EmbeddingUpdater(nn.Module):
 
         return updated_dynamic_entity_emb, updated_dynamic_relation_emb
 
-
-class GraphStructuralRNNConv(nn.Module):
-    def __init__(self, graph_conv, num_gconv_layers, rnn, num_rnn_layers, in_dim, hid_dim, num_nodes, num_rels, rel_embed_dim,
+class GraphRNNConv(nn.Module):
+    def __init__(self, graph_conv, num_gconv_layers, rnn, num_rnn_layers, in_dim, hid_dim, num_nodes, num_rels, 
+                 node_latest_event_time=None, time_interval_transform=None,
                  add_entity_emb=False, dropout=0.0, activation=None, graph_name=None):
         super().__init__()
-
+        if (node_latest_event_time is not None and 
+            time_interval_transform is not None and 
+            add_entity_emb):
+            raise ValueError('Setting add_entity_emb means that we are training for Structural Relation prediction. '
+                             'In those cases, you must not set temporal related parameters (i.e. node_latest_event_time and time_interval_transform.')
         self.num_nodes = num_nodes  # num nodes in the entire G
         self.num_rels = num_rels
 
@@ -132,21 +136,50 @@ class GraphStructuralRNNConv(nn.Module):
         else:
             raise ValueError(f"Invalid graph conv: {graph_conv}")
 
-        structural_rnn_in_dim = hid_dim
-        self.add_entity_emb = add_entity_emb
-        if self.add_entity_emb:
-            structural_rnn_in_dim += hid_dim
+        self._temporal_model = False
+        # only used for structural embeddings
+        self.add_entity_emb = add_entity_emb        
+        if add_entity_emb:
+            # only for structural embeddings we add entitiy_embeddings to the hidden dim as well.
+            hid_dim += hid_dim
+        elif (node_latest_event_time is not None and time_interval_transform is not None):
+            # Temporal related parameters that are used in the forward function.
+            self.node_latest_event_time = node_latest_event_time
+            self.time_interval_transform = time_interval_transform  
+            self._temporal_model = True
 
+        # Adding Layers 
         if rnn == "GRU":
-            self.rnn_structural = nn.GRU(input_size=structural_rnn_in_dim, hidden_size=hid_dim,
-                                         num_layers=num_rnn_layers, batch_first=True, dropout=0.0)
+            self.rnn = nn.GRU(input_size=hid_dim, hidden_size=hid_dim, num_layers=num_rnn_layers, batch_first=True, dropout=0.0)
         elif rnn == "RNN":
-            self.rnn_structural = nn.RNN(input_size=structural_rnn_in_dim, hidden_size=hid_dim,
-                                         num_layers=num_rnn_layers, batch_first=True, dropout=0.0)
+            self.rnn = nn.RNN(input_size=hid_dim, hidden_size=hid_dim, num_layers=num_rnn_layers, batch_first=True, dropout=0.0)
         else:
             raise ValueError(f"Invalid rnn: {rnn}")
-
         self.dropout = nn.Dropout(dropout)
+
+    def forward(self, batch_G, dynamic_entity_emb, static_entity_emb, device, batch_node_indices=None):
+        raise NotImplementedError('Illigal invocation of the forward function of the base class.') 
+    
+
+class GraphStructuralRNNConv(GraphRNNConv):
+    def __init__(self, graph_conv, num_gconv_layers, rnn, num_rnn_layers, in_dim, hid_dim, num_nodes, num_rels, rel_embed_dim,
+                 add_entity_emb=False, dropout=0.0, activation=None, graph_name=None):
+        super(GraphRNNConv).__init__(
+                graph_conv=graph_conv, 
+                num_gconv_layers=num_gconv_layers, 
+                rnn=rnn, 
+                num_rnn_layers=num_rnn_layers, 
+                in_dim=in_dim, 
+                hid_dim=hid_dim, 
+                num_nodes=num_nodes, 
+                num_rels=num_rels, 
+                node_latest_event_time=None, 
+                time_interval_transform=None,
+                add_entity_emb=add_entity_emb, 
+                dropout=dropout, 
+                activation=activation, 
+                graph_name=graph_name)
+     
 
     def forward(self, batch_G, dynamic_entity_emb, static_entity_emb, device, batch_node_indices=None):
         if batch_node_indices is None:
@@ -170,8 +203,12 @@ class GraphStructuralRNNConv(nn.Module):
         # Update structural dynamics
         structural_dynamic = dynamic_entity_emb.structural[batch_G.ndata[dgl.NID][batch_node_indices].long()]
         structural_dynamic = structural_dynamic.to(device)
-
-        output, hn = self.rnn_structural(structural_rnn_input, structural_dynamic.transpose(0, 1).contiguous())  # transpose to make shape to be (num_layers, batch, hidden_size)
+        ######################################################################
+        # output: containing the output features (h_t) from the last layer of the RNN, for each t
+        # hn: containing the final hidden state for each element in the batch
+        # TODO(khatir): why does the output not being used? 
+        output, hn = self.rnn(structural_rnn_input, structural_dynamic.transpose(0, 1).contiguous())  # transpose to make shape to be (num_layers, batch, hidden_size)
+        ######################################################################
         updated_structural_dynamic_entity_emb = hn.transpose(0, 1)  # transpose to make shape to be (batch, num_layers, hidden_size)
 
         return updated_structural_dynamic_entity_emb
@@ -185,34 +222,22 @@ class GraphTemporalRNNConv(nn.Module):
     def __init__(self, graph_conv, num_gconv_layers, rnn, num_rnn_layers, in_dim, hid_dim,
                  node_latest_event_time, time_interval_transform, num_nodes, num_rels,
                  dropout=0.0, activation=None, graph_name=None):
-        super().__init__()
-
-        self.num_nodes = num_nodes  # num nodes in the entire G
-        self.num_rels = num_rels
-
-        if 'RGCN' == graph_conv:
-            self.graph_conv = RGCN(in_dim, hid_dim, hid_dim, n_layers=num_gconv_layers,
-                                   num_rels=self.num_rels, regularizer="bdd",
-                                   num_bases=50 if graph_name == "GDELT" else 100, dropout=dropout,
-                                   activation=activation, layer_norm=False)
-        else:
-            raise ValueError(f"Invalid graph conv: {graph_conv}")
-
-        self.node_latest_event_time = node_latest_event_time
-        self.time_interval_transform = time_interval_transform
-
-        temporal_rnn_in_dim = hid_dim
-        if rnn == "GRU":
-            self.rnn_temporal = nn.GRU(input_size=temporal_rnn_in_dim, hidden_size=hid_dim,
-                                       num_layers=num_rnn_layers, batch_first=True, dropout=0.0)
-        elif rnn == "RNN":
-            self.rnn_temporal = nn.RNN(input_size=temporal_rnn_in_dim, hidden_size=hid_dim,
-                                       num_layers=num_rnn_layers, batch_first=True, dropout=0.0)
-        else:
-            raise ValueError(f"Invalid rnn: {rnn}")
-
-        self.dropout = nn.Dropout(dropout)
-
+        super(GraphRNNConv).__init__(
+                graph_conv=graph_conv, 
+                num_gconv_layers=num_gconv_layers, 
+                rnn=rnn, 
+                num_rnn_layers=num_rnn_layers, 
+                in_dim=in_dim, 
+                hid_dim=hid_dim, 
+                num_nodes=num_nodes, 
+                num_rels=num_rels, 
+                node_latest_event_time=node_latest_event_time, 
+                time_interval_transform=time_interval_transform,
+                add_entity_emb=None, 
+                dropout=dropout, 
+                activation=activation, 
+                graph_name=graph_name)
+        
     def forward(self, batch_G, dynamic_entity_emb, static_entity_emb, device, batch_node_indices=None):
         """
         Args:
@@ -239,29 +264,31 @@ class GraphTemporalRNNConv(nn.Module):
 
         """Temporal RNN input"""
         batch_temporal_static_entity_emb = static_entity_emb.temporal[batch_G.ndata[dgl.NID].long()].to(device)
-        edge_norm = (1 / self.time_interval_transform(batch_G_sparse_inter_event_times).clamp(min=1e-10)).clamp(max=10.0)
-        batch_G_conv_temporal_static_emb = self.graph_conv(batch_G, batch_temporal_static_entity_emb, batch_G.edata['rel_type'].long(), edge_norm)
-        temporal_rnn_input_batch_G = torch.cat([
-            batch_G_conv_temporal_static_emb,
-        ], dim=1)[batch_node_indices].unsqueeze(1)
-
         rev_batch_temporal_static_entity_emb = static_entity_emb.temporal[rev_batch_G.ndata[dgl.NID].long()].to(device)
+        
+        edge_norm = (1 / self.time_interval_transform(batch_G_sparse_inter_event_times).clamp(min=1e-10)).clamp(max=10.0)
         rev_edge_norm = (1 / self.time_interval_transform(rev_batch_G_sparse_inter_event_times).clamp(min=1e-10)).clamp(max=10.0)
+        
+        ######################################################################
+        batch_G_conv_temporal_static_emb = self.graph_conv(batch_G, batch_temporal_static_entity_emb, batch_G.edata['rel_type'].long(), edge_norm)
         rev_batch_G_conv_temporal_static_emb = self.graph_conv(rev_batch_G, rev_batch_temporal_static_entity_emb, batch_G.edata['rel_type'].long(), rev_edge_norm)
-        temporal_rnn_input_rev_batch_G = torch.cat([
-            rev_batch_G_conv_temporal_static_emb,
-        ], dim=1)[batch_node_indices].unsqueeze(1)
+        ######################################################################
+
+        temporal_rnn_input_batch_G = torch.cat([batch_G_conv_temporal_static_emb,], dim=1)[batch_node_indices].unsqueeze(1)
+        temporal_rnn_input_rev_batch_G = torch.cat([rev_batch_G_conv_temporal_static_emb,], dim=1)[batch_node_indices].unsqueeze(1)
 
         temporal_dynamic = dynamic_entity_emb.temporal[batch_G.ndata[dgl.NID][batch_node_indices].long()].to(device)
         temporal_dynamic_batch_G = temporal_dynamic[..., 0]  # dynamics as a recipient
         temporal_dynamic_rev_batch_G = temporal_dynamic[..., 1]  # dynamics as a sender
 
-        output, hn = self.rnn_temporal(temporal_rnn_input_batch_G, temporal_dynamic_batch_G.transpose(0, 1).contiguous())  # transpose to make shape to be (num_layers, batch, hidden_size)
+        ######################################################################
+        # TODO(khatir): Figure out why the output not being used.
+        output, hn = self.rnn(temporal_rnn_input_batch_G, temporal_dynamic_batch_G.transpose(0, 1).contiguous())  # transpose to make shape to be (num_layers, batch, hidden_size)
+        output, hn = self.rnn(temporal_rnn_input_rev_batch_G, temporal_dynamic_rev_batch_G.transpose(0, 1).contiguous())  # transpose to make shape to be (num_layers, batch, hidden_size)
+        ######################################################################
+
         updated_temporal_dynamic_batch_G = hn.transpose(0, 1)  # transpose to make shape to be (batch, num_layers, hidden_size)
-
-        output, hn = self.rnn_temporal(temporal_rnn_input_rev_batch_G, temporal_dynamic_rev_batch_G.transpose(0, 1).contiguous())  # transpose to make shape to be (num_layers, batch, hidden_size)
         updated_temporal_dynamic_rev_batch_G = hn.transpose(0, 1)  # transpose to make shape to be (batch, num_layers, hidden_size)
-
         updated_temporal_dynamic_entity_emb = torch.cat([updated_temporal_dynamic_batch_G.unsqueeze(-1),
                                                          updated_temporal_dynamic_rev_batch_G.unsqueeze(-1)], dim=-1)
         return updated_temporal_dynamic_entity_emb
@@ -336,22 +363,40 @@ class EventTimeHelper:
 
     @classmethod
     def get_inter_event_times(cls, batch_G, node_latest_event_time, update_latest_event_time=True):
+        """Calculates the interval between the current time (node_latest_event_time) and 
+        the time that and last time (n_src, n_des) happened in the TKG.
+        
+        Note: node_latest_event_time has dim = (num_nodes, num_nodes, 2) which the last dim (2)
+              is to store both forward node_latest_event_time[:,:,0] and reverse (node_latest_event_time[:,:,1] times.
+        
+        """
         batch_G_nid = batch_G.ndata[dgl.NID].long()
         batch_latest_event_time = node_latest_event_time[batch_G_nid]
 
         batch_G_src, batch_G_dst = batch_G.edges()
         batch_G_src, batch_G_dst = batch_G_src.long(), batch_G_dst.long()
+        # Gets all times and types for all the edges. Please note that edge is defined 
+        # in a time snapshot, i.e. if two entity interact multiple times, we will have 
+        # multiple edges where the only difference is the time.
         batch_G_time, batch_G_rel = batch_G.edata['time'], batch_G.edata['rel_type'].long()
         batch_G_time = batch_G_time.to(settings.INTER_EVENT_TIME_DTYPE)
 
         device = batch_G.ndata[dgl.NID].device
+        # create an adjacency matrix
+        # Note: batch_G.num_all_nodes == batch_G.num_nodes()
         batch_inter_event_times = torch.zeros(batch_G.num_nodes(), batch_G.num_all_nodes + 1, dtype=settings.INTER_EVENT_TIME_DTYPE).to(device)
-        batch_inter_event_times[batch_G_dst, batch_G_nid[batch_G_src]] = \
-            batch_G_time - batch_latest_event_time[batch_G_dst, batch_G_nid[batch_G_src]].to(device)
+        # create a delta between the edge time (which is static time) and the time for the edge in batch_latest_event_time.
+        # This means the time interval between the current time and the time that the edge happened.
+        batch_inter_event_times[batch_G_dst, batch_G_nid[batch_G_src]] = batch_G_time - batch_latest_event_time[batch_G_dst, batch_G_nid[batch_G_src]].to(device)
 
+        # find the incoming edge with the max time. Then update 'max_event_time' node attribute with that time. 
+        # note that since we might have multiple edge from n_i to n_j, we need to get the max t.
+        #TODO(khatir): potential improvement: here the node only cares about the last time (and not the <last_time, incoming node tuple>, so we are losing some informaiton) 
         batch_G.update_all(fn.copy_e('time', 't'), fn.max('t', 'max_event_time'))
+        # Get the max event time for all nodes.
         batch_G_max_event_time = batch_G.ndata['max_event_time'].to(settings.INTER_EVENT_TIME_DTYPE)
 
+        # ????? For all row and last column ... this implies that batch_latest_event_time stores the time events chronically...
         batch_max_latest_event_time = batch_latest_event_time[:, -1].to(device)
         batch_G_max_event_time = torch.max(batch_G_max_event_time, batch_max_latest_event_time)
         batch_inter_event_times[:, -1] = batch_G_max_event_time - batch_max_latest_event_time
